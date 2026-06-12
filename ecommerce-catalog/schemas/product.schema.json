@@ -1,0 +1,283 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ecommerce-catalog/schemas/product.schema.json",
+  "title": "Product",
+  "description": "Documento de produto para o Catálogo Dinâmico de E-commerce. Modelado segundo o paradigma Query-Driven Design para MongoDB. A estrutura foi deliberadamente desnormalizada para otimizar os padrões de leitura dominantes (>80% do tráfego), aceitando o custo de redundância como trade-off consciente.",
+  "type": "object",
+
+  "required": ["_id", "sku", "name", "slug", "price", "category", "stock", "status"],
+
+  "properties": {
+
+    "_id": {
+      "bsonType": "objectId",
+      "description": "Identificador único gerado pelo MongoDB (BSON ObjectId de 12 bytes). Codifica timestamp de inserção, ID da máquina e contador — útil para ordenação cronológica nativa."
+    },
+
+    "sku": {
+      "bsonType": "string",
+      "description": "Stock Keeping Unit — identificador alfanumérico único do produto, imutável após criação. Indexado com unique:true para garantir integridade e permitir lookups O(log n).",
+      "pattern": "^[A-Z]{2,4}-[0-9]{6,10}$",
+      "examples": ["ELET-000123456", "MODA-000987654"]
+    },
+
+    "name": {
+      "bsonType": "string",
+      "description": "Nome completo do produto. Incluído no índice de texto composto (text index) juntamente com 'description' e 'tags' para suportar pesquisa full-text (QA-01).",
+      "minLength": 3,
+      "maxLength": 250
+    },
+
+    "slug": {
+      "bsonType": "string",
+      "description": "URL-friendly identifier gerado a partir do nome. Indexado com unique:true para construção de URLs SEO-friendly sem round-trips adicionais à BD.",
+      "examples": ["samsung-galaxy-s24-ultra-256gb-preto"]
+    },
+
+    "description": {
+      "bsonType": "string",
+      "description": "Descrição longa do produto. Incluída no índice de texto composto com peso inferior ao nome (weight: 2 vs weight: 10)."
+    },
+
+    "brand": {
+      "bsonType": "string",
+      "description": "Marca do produto. Campo de baixa cardinalidade — ideal para filtros facetados (QA-02). Desnormalizado aqui para evitar joins (lookups) no pipeline de pesquisa."
+    },
+
+    "price": {
+      "bsonType": "object",
+      "description": "Subdocumento de preço. A estrutura em subdocumento (em vez de um scalar) permite modelar preços históricos, por região e com descontos sem alterar o schema raiz.",
+      "required": ["current", "currency"],
+      "properties": {
+        "current": {
+          "bsonType": "decimal",
+          "description": "Preço de venda atual. Usa BSON Decimal128 para precisão monetária — evita erros de arredondamento de ponto flutuante (Float64).",
+          "minimum": 0
+        },
+        "original": {
+          "bsonType": "decimal",
+          "description": "Preço original antes de desconto. Presente apenas quando há promoção ativa. Ausência do campo indica preço sem desconto (schema flexível)."
+        },
+        "currency": {
+          "bsonType": "string",
+          "description": "Código de moeda ISO 4217.",
+          "enum": ["AOA", "USD", "EUR", "GBP"]
+        },
+        "discount_pct": {
+          "bsonType": "double",
+          "description": "Percentagem de desconto calculada. Campo derivado (desnormalizado) para evitar cálculo repetido no cliente — trade-off conscientemente aceite.",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+
+    "category": {
+      "bsonType": "object",
+      "description": "DECISÃO DE MODELAÇÃO CRÍTICA: A hierarquia de categorias é embutida (embedded) como um path materializado. Esta estratégia — em vez de referências a uma coleção 'categories' separada — elimina joins e suporta nativamente queries de subárvore com regex de prefixo ($regex: '^/eletronicos/smartphones'). Custo: atualização em cascata numa mudança de hierarquia (aceite, pois renomeações são eventos raros).",
+      "required": ["id", "name", "path"],
+      "properties": {
+        "id": {
+          "bsonType": "string",
+          "description": "Identificador da categoria folha."
+        },
+        "name": {
+          "bsonType": "string",
+          "description": "Nome da categoria folha para exibição imediata — sem lookup adicional."
+        },
+        "path": {
+          "bsonType": "string",
+          "description": "Caminho materializado da hierarquia completa. Permite queries de subárvore via índice de prefixo. Ex: '/eletronicos/smartphones/android'",
+          "examples": ["/eletronicos/smartphones/android", "/moda/calcado/desportivo"]
+        },
+        "breadcrumb": {
+          "bsonType": "array",
+          "description": "Array de nós da hierarquia para renderização do breadcrumb no frontend — completamente desnormalizado para evitar múltiplos round-trips.",
+          "items": {
+            "bsonType": "object",
+            "properties": {
+              "id": { "bsonType": "string" },
+              "name": { "bsonType": "string" },
+              "slug": { "bsonType": "string" }
+            }
+          }
+        }
+      }
+    },
+
+    "stock": {
+      "bsonType": "object",
+      "description": "Estado de inventário. Subdocumento permite modelar múltiplos armazéns e reservas atómicas sem documentos separados.",
+      "required": ["quantity", "reserved"],
+      "properties": {
+        "quantity": {
+          "bsonType": "int",
+          "description": "Stock total disponível.",
+          "minimum": 0
+        },
+        "reserved": {
+          "bsonType": "int",
+          "description": "Unidades reservadas em carrinhos ativos. Stock efetivo = quantity - reserved.",
+          "minimum": 0
+        },
+        "warehouse_id": {
+          "bsonType": "string",
+          "description": "ID do armazém principal. Suporta futura expansão para multi-warehouse."
+        },
+        "low_stock_threshold": {
+          "bsonType": "int",
+          "description": "Limiar para alertas de stock baixo. Campo opcional — ausência indica sem alerta configurado."
+        }
+      }
+    },
+
+    "status": {
+      "bsonType": "string",
+      "description": "Estado do ciclo de vida do produto. Indexado para filtros de catálogo (apenas 'active' é visível a clientes). Enum garante consistência sem constraint de BD relacional.",
+      "enum": ["active", "inactive", "draft", "discontinued", "out_of_stock"]
+    },
+
+    "attributes": {
+      "bsonType": "object",
+      "description": "NÚCLEO DO SCHEMA FLEXÍVEL: Subdocumento de atributos altamente dinâmicos e específicos por categoria de produto. Este é o principal argumento para a escolha do MongoDB sobre um RDBMS: em SQL, este design exigiria EAV (Entity-Attribute-Value) com joins custosos ou colunas JSON semi-estruturadas. Aqui, é nativo e indexável. Cada categoria define os seus próprios campos sem migrações de schema.",
+      "additionalProperties": true,
+      "examples": [
+        {
+          "_category_context": "Smartphone",
+          "screen_size_inches": 6.8,
+          "screen_technology": "Dynamic AMOLED 2X",
+          "screen_refresh_rate_hz": 120,
+          "processor": "Snapdragon 8 Gen 3",
+          "ram_gb": 12,
+          "storage_gb": 256,
+          "battery_mah": 5000,
+          "os": "Android 14",
+          "5g_capable": true,
+          "camera_main_mp": 200,
+          "ip_rating": "IP68",
+          "colors_available": ["Preto Titânio", "Bege", "Violeta"]
+        },
+        {
+          "_category_context": "T-shirt (Moda)",
+          "material": "100% Algodão Orgânico",
+          "sizes_available": ["XS", "S", "M", "L", "XL", "XXL"],
+          "fit": "Regular",
+          "care_instructions": ["Lavagem a 30°C", "Não usar secador"],
+          "sustainable": true,
+          "season": ["Verão", "Primavera"]
+        },
+        {
+          "_category_context": "Frigorífico",
+          "capacity_liters_total": 450,
+          "capacity_liters_freezer": 120,
+          "energy_class": "A+++",
+          "color": "Inox",
+          "no_frost": true,
+          "dimensions_cm": { "height": 185, "width": 70, "depth": 65 },
+          "noise_db": 38
+        }
+      ]
+    },
+
+    "images": {
+      "bsonType": "array",
+      "description": "Array de subdocumentos de imagem. Desnormalizado para evitar lookup a serviço de media — a URL CDN é suficiente para renderização.",
+      "items": {
+        "bsonType": "object",
+        "required": ["url", "is_primary"],
+        "properties": {
+          "url": { "bsonType": "string" },
+          "alt_text": { "bsonType": "string" },
+          "is_primary": { "bsonType": "bool" },
+          "width_px": { "bsonType": "int" },
+          "height_px": { "bsonType": "int" }
+        }
+      }
+    },
+
+    "tags": {
+      "bsonType": "array",
+      "description": "Array de strings de palavras-chave para pesquisa full-text e navegação facetada. Incluído no índice de texto composto com peso intermédio (weight: 5). Permite associações semânticas sem reestruturação do documento.",
+      "items": { "bsonType": "string" },
+      "examples": [["smartphone", "android", "5g", "samsung", "flagship", "oferta"]]
+    },
+
+    "reviews": {
+      "bsonType": "array",
+      "description": "DECISÃO DE DESNORMALIZAÇÃO — EMBEDDING: As avaliações são embutidas no documento do produto em vez de uma coleção separada 'reviews'. JUSTIFICAÇÃO (Query-Driven): O padrão de acesso dominante (QA-03) é 'mostrar produto com as suas avaliações mais recentes'. Com embedding, este acesso é uma única leitura de disco (1 document fetch). Com referenciação, seriam 2 operações (produto + $lookup). LIMITE: Aplicar o padrão 'Subset Pattern' — embutir apenas as N reviews mais recentes (ex: últimas 10). Reviews adicionais ficam numa coleção separada 'product_reviews_archive'. Isto previne crescimento ilimitado do documento (limite BSON: 16MB).",
+      "maxItems": 10,
+      "items": {
+        "bsonType": "object",
+        "required": ["user_id", "rating", "created_at"],
+        "properties": {
+          "review_id": {
+            "bsonType": "objectId",
+            "description": "ID único da review — permite atualização atómica via $set no array com filtro de array posicional ($[elem])."
+          },
+          "user_id": {
+            "bsonType": "string",
+            "description": "ID do utilizador. Referência intencional (não embutimos dados do utilizador aqui) — o perfil do utilizador muda frequentemente. Embedding causaria stale data e updates em massa."
+          },
+          "username_snapshot": {
+            "bsonType": "string",
+            "description": "Nome de utilizador no momento da review — desnormalizado intencionalmente. Justificação: reviews são imutáveis historicamente; o username visto na review deve ser o do momento da sua criação, não o atual."
+          },
+          "rating": {
+            "bsonType": "int",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "title": { "bsonType": "string" },
+          "body": { "bsonType": "string" },
+          "helpful_votes": {
+            "bsonType": "int",
+            "description": "Contagem de votos 'útil'. Atualizado atomicamente com $inc — operação lock-free em MongoDB.",
+            "minimum": 0
+          },
+          "verified_purchase": { "bsonType": "bool" },
+          "created_at": { "bsonType": "date" }
+        }
+      }
+    },
+
+    "rating_summary": {
+      "bsonType": "object",
+      "description": "PADRÃO 'COMPUTED PATTERN': Agregados estatísticos pré-calculados e desnormalizados no documento para servir a listagem de catálogo (QA-02) sem executar $avg e $count em tempo real. Atualizado incrementalmente via $inc e $set quando uma nova review é adicionada. Trade-off: eventual consistency entre o valor aqui e o total real — aceite, pois diferenças de milissegundos não têm impacto de negócio.",
+      "properties": {
+        "average": { "bsonType": "double" },
+        "count": { "bsonType": "int" },
+        "distribution": {
+          "bsonType": "object",
+          "description": "Distribuição de ratings para gráfico de barras — pré-calculada.",
+          "properties": {
+            "1": { "bsonType": "int" },
+            "2": { "bsonType": "int" },
+            "3": { "bsonType": "int" },
+            "4": { "bsonType": "int" },
+            "5": { "bsonType": "int" }
+          }
+        }
+      }
+    },
+
+    "seo": {
+      "bsonType": "object",
+      "description": "Metadados SEO desnormalizados para renderização SSR/SSG sem processamento adicional.",
+      "properties": {
+        "meta_title": { "bsonType": "string" },
+        "meta_description": { "bsonType": "string" },
+        "canonical_url": { "bsonType": "string" }
+      }
+    },
+
+    "created_at": {
+      "bsonType": "date",
+      "description": "Timestamp de criação do documento. Complementa o timestamp embutido no _id (ObjectId) para queries de range temporal explícitas."
+    },
+
+    "updated_at": {
+      "bsonType": "date",
+      "description": "Timestamp da última modificação. Atualizado automaticamente via middleware do ODM (ex: Mongoose pre-save hook). Indexado para sincronização com caches (ex: invalidar CDN após update)."
+    }
+  }
+}

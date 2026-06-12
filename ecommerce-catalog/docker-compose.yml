@@ -1,0 +1,125 @@
+# =============================================================================
+# Catálogo de Produtos Dinâmico — MongoDB Replica Set (Windows-compatible)
+# SGBD II — Ano Letivo 2025/2026
+# Arquitetura: 1 Primário + 2 Secundários (sem keyfile — ambiente de desenvolvimento)
+# Padrão CAP: CP (Consistency + Partition Tolerance)
+# =============================================================================
+
+networks:
+  mongo-cluster-net:
+    driver: bridge
+
+volumes:
+  mongo1-data:
+  mongo2-data:
+  mongo3-data:
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # NÓ 1 — PRIMÁRIO
+  # Aceita todas as operações de escrita. Replica para mongo2 e mongo3
+  # via oplog (operation log) de forma assíncrona.
+  # ---------------------------------------------------------------------------
+  mongo1:
+    image: mongo:7.0
+    container_name: mongo1
+    hostname: mongo1
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo1-data:/data/db
+    networks:
+      - mongo-cluster-net
+    command: mongod --replSet rs0 --bind_ip_all --port 27017
+    healthcheck:
+      test: mongosh --quiet --eval "db.adminCommand('ping').ok"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # NÓ 2 — SECUNDÁRIO
+  # Mantém réplica do oplog do primário. Pode servir leituras com
+  # readPreference: secondaryPreferred — alivia carga no primário.
+  # ---------------------------------------------------------------------------
+  mongo2:
+    image: mongo:7.0
+    container_name: mongo2
+    hostname: mongo2
+    restart: unless-stopped
+    ports:
+      - "27018:27017"
+    volumes:
+      - mongo2-data:/data/db
+    networks:
+      - mongo-cluster-net
+    command: mongod --replSet rs0 --bind_ip_all --port 27017
+    healthcheck:
+      test: mongosh --quiet --eval "db.adminCommand('ping').ok"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # NÓ 3 — SECUNDÁRIO
+  # Terceiro membro garante quórum ímpar (2 de 3 votos para eleição).
+  # Se mongo1 falhar, mongo2 e mongo3 elegem automaticamente um novo primário.
+  # ---------------------------------------------------------------------------
+  mongo3:
+    image: mongo:7.0
+    container_name: mongo3
+    hostname: mongo3
+    restart: unless-stopped
+    ports:
+      - "27019:27017"
+    volumes:
+      - mongo3-data:/data/db
+    networks:
+      - mongo-cluster-net
+    command: mongod --replSet rs0 --bind_ip_all --port 27017
+    healthcheck:
+      test: mongosh --quiet --eval "db.adminCommand('ping').ok"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # INICIALIZADOR DO REPLICA SET
+  # Aguarda os 3 nós estarem saudáveis e executa rs.initiate()
+  # para formar o cluster. Corre uma única vez e termina.
+  # ---------------------------------------------------------------------------
+  mongo-rs-init:
+    image: mongo:7.0
+    container_name: mongo-rs-init
+    restart: "no"
+    depends_on:
+      mongo1:
+        condition: service_healthy
+      mongo2:
+        condition: service_healthy
+      mongo3:
+        condition: service_healthy
+    networks:
+      - mongo-cluster-net
+    command: >
+      mongosh --host mongo1:27017 --eval "
+        try {
+          rs.status();
+          print('Replica Set ja inicializado.');
+        } catch(e) {
+          rs.initiate({
+            _id: 'rs0',
+            members: [
+              { _id: 0, host: 'mongo1:27017', priority: 2 },
+              { _id: 1, host: 'mongo2:27017', priority: 1 },
+              { _id: 2, host: 'mongo3:27017', priority: 1 }
+            ]
+          });
+          print('Replica Set inicializado com sucesso!');
+        }
+      "
